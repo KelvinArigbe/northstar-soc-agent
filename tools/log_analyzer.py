@@ -1,17 +1,22 @@
+
 import re
 import json
 
 from pathlib import Path
 from collections import Counter
+from datetime import datetime, timedelta
 
 LOG_FILE = Path("logs/auth.log")
 
-# Detection configuration
 BRUTE_FORCE_THRESHOLD = 3
+DETECTION_WINDOW_MINUTES = 5
+
+
+def parse_timestamp(value):
+    return datetime.strptime(value, "%b %d %H:%M:%S")
 
 
 def analyze_logs():
-    """Extract structured authentication evidence from logs."""
 
     if not LOG_FILE.exists():
         raise FileNotFoundError(f"Log file not found: {LOG_FILE}")
@@ -25,7 +30,7 @@ def analyze_logs():
     for line in logs:
 
         failed = re.search(
-            r"Failed password for (\S+) from ([\d.]+)",
+            r"^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}).*Failed password for (\S+) from ([\d.]+)",
             line
         )
 
@@ -41,8 +46,9 @@ def analyze_logs():
 
         if failed:
             failed_logins.append({
-                "username": failed.group(1),
-                "source_ip": failed.group(2)
+                "timestamp": failed.group(1),
+                "username": failed.group(2),
+                "source_ip": failed.group(3)
             })
 
         if successful:
@@ -61,10 +67,7 @@ def analyze_logs():
         "total_log_lines": len(logs),
         "failed_login_count": len(failed_logins),
         "failed_login_sources": dict(
-            Counter(
-                event["source_ip"]
-                for event in failed_logins
-            )
+            Counter(event["source_ip"] for event in failed_logins)
         ),
         "failed_logins": failed_logins,
         "successful_logins": successful_logins,
@@ -72,20 +75,61 @@ def analyze_logs():
     }
 
 
-def detect_brute_force(evidence, threshold=BRUTE_FORCE_THRESHOLD):
-    """Detect repeated failed SSH login attempts by source IP."""
+def detect_brute_force(
+    evidence,
+    threshold=BRUTE_FORCE_THRESHOLD,
+    window_minutes=DETECTION_WINDOW_MINUTES
+):
 
     alerts = []
+    events_by_ip = {}
 
-    for ip, count in evidence["failed_login_sources"].items():
+    for event in evidence["failed_logins"]:
+        ip = event["source_ip"]
+        events_by_ip.setdefault(ip, []).append(event)
 
-        if count >= threshold:
+    for ip, events in events_by_ip.items():
+
+        events.sort(
+            key=lambda event: parse_timestamp(event["timestamp"])
+        )
+
+        left = 0
+        max_count = 0
+        matched_events = []
+
+        for right, event in enumerate(events):
+
+            current_time = parse_timestamp(event["timestamp"])
+
+            while left <= right:
+                first_time = parse_timestamp(
+                    events[left]["timestamp"]
+                )
+
+                if current_time - first_time > timedelta(
+                    minutes=window_minutes
+                ):
+                    left += 1
+                else:
+                    break
+
+            current_count = right - left + 1
+
+            if current_count > max_count:
+                max_count = current_count
+                matched_events = events[left:right + 1]
+
+        if max_count >= threshold:
             alerts.append({
                 "rule_id": "DET-001",
-                "alert": "Multiple failed SSH login attempts",
+                "alert": "SSH brute-force activity detected",
                 "source_ip": ip,
-                "failed_attempts": count,
+                "failed_attempts": max_count,
                 "threshold": threshold,
+                "window_minutes": window_minutes,
+                "first_attempt": matched_events[0]["timestamp"],
+                "last_attempt": matched_events[-1]["timestamp"],
                 "severity": "Medium"
             })
 
@@ -101,4 +145,3 @@ if __name__ == "__main__":
         "evidence": evidence,
         "alerts": alerts
     }, indent=4))
-
