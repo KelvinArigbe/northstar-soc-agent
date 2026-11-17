@@ -1,12 +1,18 @@
-
 import re
+import json
+
 from pathlib import Path
 from collections import Counter
 
 LOG_FILE = Path("logs/auth.log")
 
+# Detection configuration
+BRUTE_FORCE_THRESHOLD = 3
+
 
 def analyze_logs():
+    """Extract structured authentication evidence from logs."""
+
     if not LOG_FILE.exists():
         raise FileNotFoundError(f"Log file not found: {LOG_FILE}")
 
@@ -55,7 +61,10 @@ def analyze_logs():
         "total_log_lines": len(logs),
         "failed_login_count": len(failed_logins),
         "failed_login_sources": dict(
-            Counter(event["source_ip"] for event in failed_logins)
+            Counter(
+                event["source_ip"]
+                for event in failed_logins
+            )
         ),
         "failed_logins": failed_logins,
         "successful_logins": successful_logins,
@@ -63,8 +72,33 @@ def analyze_logs():
     }
 
 
-if __name__ == "__main__":
-    import json
+def detect_brute_force(evidence, threshold=BRUTE_FORCE_THRESHOLD):
+    """Detect repeated failed SSH login attempts by source IP."""
 
-    results = analyze_logs()
-    print(json.dumps(results, indent=4))
+    alerts = []
+
+    for ip, count in evidence["failed_login_sources"].items():
+
+        if count >= threshold:
+            alerts.append({
+                "rule_id": "DET-001",
+                "alert": "Multiple failed SSH login attempts",
+                "source_ip": ip,
+                "failed_attempts": count,
+                "threshold": threshold,
+                "severity": "Medium"
+            })
+
+    return alerts
+
+
+if __name__ == "__main__":
+
+    evidence = analyze_logs()
+    alerts = detect_brute_force(evidence)
+
+    print(json.dumps({
+        "evidence": evidence,
+        "alerts": alerts
+    }, indent=4))
+
